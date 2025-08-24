@@ -645,20 +645,29 @@ process.on('unhandledRejection', (reason, promise) => {
 
 async function run() {
     try {
-        history  = JSON.parse(await fs.promises.readFile('history.json', 'utf-8'));
-        memory   = JSON.parse(await fs.promises.readFile('memory.json', 'utf-8'));
+        history = JSON.parse(await fs.promises.readFile('history.json', 'utf-8'));
+    } catch (err: any) {
+        console.log('Error when loading history:', err);
+        history = [];
+    }
+
+    try {
+        memory = JSON.parse(await fs.promises.readFile('memory.json', 'utf-8'));
+    }  catch (err: any) {
+        console.log('Error when loading memory:', err);
+        memory = [];
+    }
+
+    try {
         schedule = JSON.parse(await fs.promises.readFile('schedule.json', 'utf-8'));
         await handleSchedule();
     } catch (err: any) {
-        console.log('Error when loading json data:', err);
-
-        history  = [];
-        memory   = [];
+        console.log('Error when loading schedule:', err);
         schedule = {};
-    } finally {
-        startScheduleInterval();
-        await bot.start();
     }
+
+    startScheduleInterval();
+    await bot.start();
 }
 
 run();
