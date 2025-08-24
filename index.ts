@@ -19,7 +19,7 @@ const openai = new OpenAI({
 const bot = new Bot(process.env.TG_BOT_TOKEN, socks);
 
 let history: any[]                     = [];
-let memory: string[]                   = [];
+let memory: string                     = '';
 let schedule: Record<string, string[]> = {};
 
 let scheduleInterval: NodeJS.Timeout | null = null;
@@ -78,10 +78,13 @@ const tools: Record<string, ChatCompletionTool> = {
                     {
                         role   : 'system' as const,
                         content: [
-                            {type: 'text', text: 'Ты персональный ассистент-бот в Telegram. Будь дружелюбным. Не используй Markdown разметку.'},
+                            {
+                                type: 'text',
+                                text: 'Ты персональный ассистент-бот в Telegram. Будь дружелюбным. Не используй Markdown разметку.'
+                            },
                             ...memory.length > 0 ? [{
                                 type: 'text',
-                                text: `Вот что ты помнишь о пользователе: ${JSON.stringify(memory)}`
+                                text: `Вот что ты знаешь о пользователе:\n${memory}`
                             }] : [],
                         ]
                     },
@@ -135,18 +138,24 @@ const tools: Record<string, ChatCompletionTool> = {
         type    : 'function',
         function: {
             name       : 'remember',
-            description: 'YOU MUST ALWAYS call this function when user shares personal information (name, age, preferences, habits, etc.) or ' +
-                'explicitly asks you to remember something. Never just say "I remembered" - you MUST execute this ' +
-                'function to actually store the information. Call this function immediately when you identify ' +
-                'information worth remembering.',
+            description: 'YOU MUST ALWAYS call this function when user shares personal information or asks you to ' +
+                'remember something. This function COMPLETELY REPLACES all stored memory with new comprehensive ' +
+                'information. Analyze existing knowledge, UPDATE outdated information, REMOVE irrelevant ' +
+                'details, and ADD new information. Create a clean, current, and comprehensive user profile.',
             parameters : {
                 type                : 'object',
                 properties          : {
                     info: {
                         type       : 'string',
-                        description: 'Detailed information to remember about the user. Be specific and include context. ' +
-                            'Example: "User\'s name is John", "User has a dog named Buddy", ' +
-                            '"User works as software developer", "User prefers coffee over tea"'
+                        description: 'COMPLETE updated user profile that will REPLACE all existing memory. ' +
+                            'Should include: 1) Current and relevant personal details (name, age, location, job), ' +
+                            '2) Active preferences and habits, 3) Recent plans and goals, 4) Important ongoing ' +
+                            'relationships/projects. EXCLUDE: outdated information (old jobs, completed projects, ' +
+                            'changed preferences), temporary details that are no longer relevant, contradictory ' +
+                            'information (keep only the most recent). Example: "User is John Smith, 29 years old ' +
+                            '(updated from 28), software developer at New Tech Company (changed jobs), lives in ' +
+                            'Moscow. Has dog named Buddy. Prefers coffee. Currently planning wedding for next year ' +
+                            '(removed old Paris trip - completed)."'
                     }
                 },
                 required            : ['info'],
@@ -154,9 +163,9 @@ const tools: Record<string, ChatCompletionTool> = {
             }
         },
         async handle({info}) {
-            memory.push(info);
+            memory = info;
             await saveMemory();
-            return 'Success';
+            return 'User profile completely updated - outdated information removed, current details preserved';
         }
     },
 
@@ -307,37 +316,37 @@ const tools: Record<string, ChatCompletionTool> = {
     },
 
     updateSchedule: {
-        type: 'function',
+        type    : 'function',
         function: {
-            name: 'updateSchedule',
+            name       : 'updateSchedule',
             description: 'CRITICAL: Update existing scheduled tasks. Use this function to modify task descriptions or change datetime for existing tasks. ALWAYS call getSchedule first to see current tasks before updating. Use EXACT task text and datetime from getSchedule function.',
-            parameters: {
-                type: 'object',
-                properties: {
+            parameters : {
+                type                : 'object',
+                properties          : {
                     old_datetime: {
-                        type: 'string',
-                        format: 'date-time',
+                        type       : 'string',
+                        format     : 'date-time',
                         description: 'Current date and time in ISO 8601 format. Use EXACT datetime from getSchedule function. Examples: "2024-01-15T14:30:00Z", "2024-01-15T14:30:00+03:00"'
                     },
-                    old_task: {
-                        type: 'string',
+                    old_task    : {
+                        type       : 'string',
                         description: 'Current task text that needs to be updated. Use EXACT text from getSchedule function.'
                     },
                     new_datetime: {
-                        type: 'string',
-                        format: 'date-time',
+                        type       : 'string',
+                        format     : 'date-time',
                         description: 'New date and time in ISO 8601 format. If not changing time, use same as old_datetime.'
                     },
-                    new_task: {
-                        type: 'string',
+                    new_task    : {
+                        type       : 'string',
                         description: 'New task text. Must be written from AI perspective like "Remind the user about...", "Notify the user that...".'
                     },
-                    confirmed: {
-                        type: 'boolean',
+                    confirmed   : {
+                        type       : 'boolean',
                         description: 'Has the user explicitly confirmed the update? Set to false initially, then true only after user confirms. BEFORE calling this function with confirmed=true, you MUST ask user for confirmation using this exact format: "Подтверждаете изменение задачи?\\nСтарая задача: [old_task]\\nВремя: [old_datetime]\\nНовая задача: [new_task]\\nВремя: [new_datetime]"'
                     }
                 },
-                required: ['old_datetime', 'old_task', 'new_datetime', 'new_task', 'confirmed'],
+                required            : ['old_datetime', 'old_task', 'new_datetime', 'new_task', 'confirmed'],
                 additionalProperties: false
             }
         },
@@ -391,7 +400,7 @@ async function saveHistory() {
 }
 
 async function saveMemory() {
-    await fs.promises.writeFile('memory.json', JSON.stringify(memory));
+    await fs.promises.writeFile('memory.txt', memory);
 }
 
 async function saveSchedule() {
@@ -478,7 +487,7 @@ bot.onMessage(async (ctx) => {
                                 },
                                 ...memory.length > 0 ? [{
                                     type: 'text',
-                                    text: `Вот что ты помнишь о пользователе: ${JSON.stringify(memory)}`
+                                    text: `Вот что ты знаешь о пользователе:\n${memory}`
                                 }] : [],
                                 {
                                     type: 'text',
@@ -558,7 +567,7 @@ async function handleSchedule() {
                                 },
                                 ...memory.length > 0 ? [{
                                     type: 'text',
-                                    text: `Вот что ты помнишь о пользователе: ${JSON.stringify(memory)}`
+                                    text: `Вот что ты знаешь о пользователе:\n${memory}`
                                 }] : [],
                                 {
                                     type: 'text',
@@ -652,10 +661,10 @@ async function run() {
     }
 
     try {
-        memory = JSON.parse(await fs.promises.readFile('memory.json', 'utf-8'));
-    }  catch (err: any) {
+        memory = await fs.promises.readFile('memory.txt', 'utf-8');
+    } catch (err: any) {
         console.log('Error when loading memory:', err);
-        memory = [];
+        memory = '';
     }
 
     try {
