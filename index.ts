@@ -18,8 +18,13 @@ const openai = new OpenAI({
 
 const bot = new Bot(process.env.TG_BOT_TOKEN, socks);
 
-let history: any[]   = [];
-let memory: string[] = [];
+let history: any[]                     = [];
+let memory: string[]                   = [];
+let schedule: Record<string, string[]> = {};
+
+let scheduleInterval: NodeJS.Timeout | null = null;
+let isShuttingDown                          = false;
+let isHandlingSchedule                      = false;
 
 const tools: Record<string, ChatCompletionTool> = {
     systemInfo: {
@@ -72,7 +77,13 @@ const tools: Record<string, ChatCompletionTool> = {
                 messages: [
                     {
                         role   : 'system' as const,
-                        content: 'Ты персональный ассистент-бот в Telegram. Будь дружелюбным. Не используй Markdown разметку.'
+                        content: [
+                            {type: 'text', text: 'Ты персональный ассистент-бот в Telegram. Будь дружелюбным. Не используй Markdown разметку.'},
+                            ...memory.length > 0 ? [{
+                                type: 'text',
+                                text: `Вот что ты помнишь о пользователе: ${JSON.stringify(memory)}`
+                            }] : [],
+                        ]
                     },
                     {
                         role   : 'user',
@@ -124,12 +135,18 @@ const tools: Record<string, ChatCompletionTool> = {
         type    : 'function',
         function: {
             name       : 'remember',
-            description: 'If you see some personality information about user, remember it (ex: his name, age, weight, dog name, address, habits, job, hobbies...). Or if user ask you to remember something.',
+            description: 'YOU MUST ALWAYS call this function when user shares personal information (name, age, preferences, habits, etc.) or ' +
+                'explicitly asks you to remember something. Never just say "I remembered" - you MUST execute this ' +
+                'function to actually store the information. Call this function immediately when you identify ' +
+                'information worth remembering.',
             parameters : {
                 type                : 'object',
                 properties          : {
                     info: {
-                        type: 'string'
+                        type       : 'string',
+                        description: 'Detailed information to remember about the user. Be specific and include context. ' +
+                            'Example: "User\'s name is John", "User has a dog named Buddy", ' +
+                            '"User works as software developer", "User prefers coffee over tea"'
                     }
                 },
                 required            : ['info'],
@@ -138,14 +155,247 @@ const tools: Record<string, ChatCompletionTool> = {
         },
         async handle({info}) {
             memory.push(info);
-            await fs.promises.writeFile('memory.json', JSON.stringify(memory));
+            await saveMemory();
             return 'Success';
+        }
+    },
+
+    time: {
+        type    : 'function',
+        function: {
+            name       : 'time',
+            description: 'Find out what date and time is now.',
+            parameters : {}
+        },
+        async handle(input: any) {
+            return (new Date()).toString();
+        }
+    },
+
+    schedule: {
+        type    : 'function',
+        function: {
+            name       : 'schedule',
+            description: 'Schedule tasks for specific times. IMPORTANT: 1) When creating tasks, ' +
+                'always describe what YOU (the AI) should do for the user at that time. ' +
+                'Use formats like "Remind the user about [event]" or "Notify the user that ' +
+                '[deadline approaching]". 2) ALWAYS ask for user confirmation before scheduling. ' +
+                'Use this exact format for confirmation: "Подтверждаете задачу?\nЗадача: [task description]\n' +
+                'Время: [date and time]"',
+            parameters : {
+                type                : 'object',
+                properties          : {
+                    datetime : {
+                        type       : 'string',
+                        format     : 'date-time',
+                        description: 'Date and time in ISO 8601 format with timezone. Examples: ' +
+                            '"2024-01-15T14:30:00Z" (UTC), "2024-01-15T14:30:00+03:00" (Moscow), ' +
+                            '"2024-01-15T14:30:00-05:00" (New York). If the user did not specify a date, or ' +
+                            'did not specify whether something needs to be done today or tomorrow, then by default, ' +
+                            'consider that today.'
+                    },
+                    task     : {
+                        type       : 'string',
+                        description: 'What YOU (the AI) need to do for the user at the scheduled time. Must be written ' +
+                            'from AI perspective. Examples: "Remind the user about the doctor appointment", ' +
+                            '"Notify the user that the project deadline is today", "Alert the user about the ' +
+                            'upcoming meeting with the team". Never write just "meeting" - always write "Remind ' +
+                            'the user about the meeting".'
+                    },
+                    confirmed: {
+                        type       : 'boolean',
+                        description: 'Has the user explicitly confirmed the scheduled task? ' +
+                            'Set to false initially, then true only after user confirms. ' +
+                            'BEFORE calling this function with confirmed=true, you MUST ask user ' +
+                            'for confirmation using this exact format: "Подтверждаете задачу?\\n' +
+                            'Задача: [task description]\\nВремя: [date and time in the user time zone in an understandable human language]"'
+                    }
+                },
+                required            : ['datetime', 'task', 'confirmed'],
+                additionalProperties: false
+            }
+        },
+        async handle({datetime, task, confirmed}) {
+            if (!confirmed)
+                return 'Must be confirmed';
+
+            const date = new Date(datetime);
+            date.setSeconds(0, 0);
+
+            if (!schedule.hasOwnProperty(date.toISOString()))
+                schedule[date.toISOString()] = [task];
+            else
+                schedule[date.toISOString()].push(task);
+
+            await saveSchedule();
+
+            return 'Success';
+        }
+    },
+
+    getSchedule: {
+        type    : 'function',
+        function: {
+            name       : 'getSchedule',
+            description: 'CRITICAL: Get current schedule information. This function returns the ONLY accurate and ' +
+                'up-to-date schedule data. YOU MUST ALWAYS call this function when user asks about scheduled tasks, ' +
+                'appointments, or reminders. NEVER rely on previous conversation history about schedule - it may be ' +
+                'outdated. IGNORE any schedule information from earlier messages. This function is the SINGLE SOURCE ' +
+                'OF TRUTH for all scheduled tasks.',
+            parameters : {}
+        },
+        async handle(input: any) {
+            return JSON.stringify(Object.fromEntries(
+                Object.entries(schedule).filter(([datetime, tasks]) => tasks.length > 0)
+            ));
+        }
+    },
+
+    removeFromSchedule: {
+        type    : 'function',
+        function: {
+            name       : 'removeFromSchedule',
+            description: 'Remove schedule information',
+            parameters : {
+                type                : 'object',
+                properties          : {
+                    datetime : {
+                        type       : 'string',
+                        format     : 'date-time',
+                        description: 'Date and time in ISO 8601 format with timezone. Examples: ' +
+                            '"2024-01-15T14:30:00Z" (UTC), "2024-01-15T14:30:00+03:00" (Moscow), ' +
+                            '"2024-01-15T14:30:00-05:00" (New York). If the user did not specify a date, or ' +
+                            'did not specify whether something needs to be done today or tomorrow, then by default, ' +
+                            'consider that today.'
+                    },
+                    task     : {
+                        type       : 'string',
+                        description: 'Concrete task name. You can fetch it from getSchedule tool.'
+                    },
+                    confirmed: {
+                        type       : 'boolean',
+                        description: 'Has the user explicitly confirmed to remove the scheduled task? ' +
+                            'Set to false initially, then true only after user confirms. ' +
+                            'BEFORE calling this function with confirmed=true, you MUST ask user ' +
+                            'for confirmation using this exact format: "Вы точно хотите удалить задачу?\\n' +
+                            'Задача: [task description]\\nВремя: [date and time in the user time zone in an understandable human language]"'
+                    }
+                },
+                required            : [],
+                additionalProperties: false
+            }
+        },
+        async handle({datetime, task, confirmed}) {
+            if (!confirmed)
+                return 'Must be confirmed';
+
+            const date = new Date(datetime);
+            date.setSeconds(0, 0);
+
+            if (!schedule.hasOwnProperty(date.toISOString()))
+                return 'Tasks not found at this date and time';
+
+            if (!schedule[date.toISOString()].find(t => t == task))
+                return 'This task not found';
+
+            schedule[date.toISOString()] = schedule[date.toISOString()].filter(t => t !== task);
+
+            await saveSchedule();
+
+            return 'Success';
+        }
+    },
+
+    updateSchedule: {
+        type: 'function',
+        function: {
+            name: 'updateSchedule',
+            description: 'CRITICAL: Update existing scheduled tasks. Use this function to modify task descriptions or change datetime for existing tasks. ALWAYS call getSchedule first to see current tasks before updating. Use EXACT task text and datetime from getSchedule function.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    old_datetime: {
+                        type: 'string',
+                        format: 'date-time',
+                        description: 'Current date and time in ISO 8601 format. Use EXACT datetime from getSchedule function. Examples: "2024-01-15T14:30:00Z", "2024-01-15T14:30:00+03:00"'
+                    },
+                    old_task: {
+                        type: 'string',
+                        description: 'Current task text that needs to be updated. Use EXACT text from getSchedule function.'
+                    },
+                    new_datetime: {
+                        type: 'string',
+                        format: 'date-time',
+                        description: 'New date and time in ISO 8601 format. If not changing time, use same as old_datetime.'
+                    },
+                    new_task: {
+                        type: 'string',
+                        description: 'New task text. Must be written from AI perspective like "Remind the user about...", "Notify the user that...".'
+                    },
+                    confirmed: {
+                        type: 'boolean',
+                        description: 'Has the user explicitly confirmed the update? Set to false initially, then true only after user confirms. BEFORE calling this function with confirmed=true, you MUST ask user for confirmation using this exact format: "Подтверждаете изменение задачи?\\nСтарая задача: [old_task]\\nВремя: [old_datetime]\\nНовая задача: [new_task]\\nВремя: [new_datetime]"'
+                    }
+                },
+                required: ['old_datetime', 'old_task', 'new_datetime', 'new_task', 'confirmed'],
+                additionalProperties: false
+            }
+        },
+        async handle({old_datetime, old_task, new_datetime, new_task, confirmed}) {
+            if (!confirmed) {
+                return 'Must be confirmed';
+            }
+
+            try {
+                // Нормализуем даты
+                const oldDate = new Date(old_datetime);
+                oldDate.setSeconds(0, 0);
+                const oldKey = oldDate.toISOString();
+
+                const newDate = new Date(new_datetime);
+                newDate.setSeconds(0, 0);
+                const newKey = newDate.toISOString();
+
+                // Проверяем что старая задача существует
+                if (!schedule[oldKey]) {
+                    return 'Original datetime not found in schedule';
+                }
+
+                const taskIndex = schedule[oldKey].findIndex(t => t === old_task);
+                if (taskIndex === -1) {
+                    return 'Original task not found';
+                }
+
+                // Удаляем старую задачу
+                schedule[oldKey].splice(taskIndex, 1);
+
+                // Добавляем новую задачу
+                if (!schedule[newKey]) {
+                    schedule[newKey] = [];
+                }
+                schedule[newKey].push(new_task);
+
+                await saveSchedule();
+
+                return `Task updated successfully. Moved from ${old_datetime} to ${new_datetime}`;
+
+            } catch (error) {
+                return `Error updating task: ${error.message}`;
+            }
         }
     }
 };
 
 async function saveHistory() {
     await fs.promises.writeFile('history.json', JSON.stringify(history.slice(-50)));
+}
+
+async function saveMemory() {
+    await fs.promises.writeFile('memory.json', JSON.stringify(memory));
+}
+
+async function saveSchedule() {
+    await fs.promises.writeFile('schedule.json', JSON.stringify(schedule));
 }
 
 bot.onMessage(async (ctx) => {
@@ -224,16 +474,20 @@ bot.onMessage(async (ctx) => {
                                 },
                                 {
                                     type: 'text',
-                                    text: 'Сообщи пользователю в первый раз, что если он хочет очистить историю сообщений, пусть попросит об этом или напишет команду /clear'
-                                },
-                                {
-                                    type: 'text',
                                     text: 'Ты умеешь запоминать персональную информацию о пользователе, чтобы более персонализировано отвечать на запросы.'
                                 },
                                 ...memory.length > 0 ? [{
                                     type: 'text',
                                     text: `Вот что ты помнишь о пользователе: ${JSON.stringify(memory)}`
-                                }] : []
+                                }] : [],
+                                {
+                                    type: 'text',
+                                    text: 'Когда надо узнать актуальную дату и время, всегда обращайся к функции time. Чтобы ты там не думал сам, актуальное дата и время берутся всегда из функции.'
+                                },
+                                {
+                                    type: 'text',
+                                    text: `В расписании задач: ${Object.values(schedule).reduce((p, c) => p + c.length, 0)}`
+                                }
                             ]
                         },
                         ...history.slice(-50)
@@ -246,17 +500,16 @@ bot.onMessage(async (ctx) => {
                 if (response.choices[0].finish_reason == 'tool_calls') {
                     await ctx.sendMessage('Выполняю функции...');
 
-                    const toolResponses = await Promise.all(response.choices[0].message.tool_calls.map(async (call) => [await tools[call.function.name].handle(JSON.parse(call.function.arguments)), call]));
-
-                    await ctx.sendMessage('Подготавливаю ответ...');
-
-                    for (let [toolResponse, call] of toolResponses) {
+                    for (let call of response.choices[0].message.tool_calls) {
+                        const result = await tools[call.function.name].handle(JSON.parse(call.function.arguments));
                         history.push({
                             role        : 'tool' as const,
-                            content     : [{type: 'text', text: toolResponse !== null ? toolResponse : 'No response'}],
+                            content     : [{type: 'text', text: result !== null ? result : 'No response'}],
                             tool_call_id: call.id
                         });
                     }
+
+                    await ctx.sendMessage('Подготавливаю ответ...');
                 }
 
                 if (response.choices[0].finish_reason == 'tool_calls') {
@@ -279,11 +532,131 @@ bot.onMessage(async (ctx) => {
     }
 });
 
+async function handleSchedule() {
+    if (isHandlingSchedule || isShuttingDown) return;
+
+    isHandlingSchedule = true;
+
+    try {
+        const now = new Date();
+        now.setSeconds(0, 0);
+
+        for (let [datetime, tasks] of Object.entries(schedule)) {
+            const date = new Date(datetime);
+            date.setSeconds(0, 0);
+
+            if (date.getTime() <= now.getTime() && tasks.length > 0) {
+                const response = await openai.chat.completions.create({
+                    model   : 'gpt-4.1-mini',
+                    messages: [
+                        {
+                            role   : 'system' as const,
+                            content: [
+                                {
+                                    type: 'text',
+                                    text: 'Ты персональный ассистент-бот в Telegram. Будь дружелюбным. Не используй Markdown разметку.'
+                                },
+                                ...memory.length > 0 ? [{
+                                    type: 'text',
+                                    text: `Вот что ты помнишь о пользователе: ${JSON.stringify(memory)}`
+                                }] : [],
+                                {
+                                    type: 'text',
+                                    text: `Ты проверил расписание, и теперь выполняешь задачи назначенное на текущее время (${now})`
+                                }
+                            ]
+                        },
+                        {
+                            role   : 'user' as const,
+                            content: `Выполни следующие задачи: ${JSON.stringify(tasks)}`
+                        }
+                    ]
+                });
+
+                await bot.sendMessage(process.env.TG_ALLOW_FROM_ID, response.choices[0].message.content);
+
+                schedule[datetime] = [];
+
+                await saveSchedule();
+            }
+        }
+    } catch (err: any) {
+        console.log('Error in handleSchedule:', err);
+    } finally {
+        isHandlingSchedule = false;
+    }
+}
+
+function startScheduleInterval() {
+    // Очищаем предыдущий интервал если есть
+    if (scheduleInterval) {
+        clearInterval(scheduleInterval);
+    }
+
+    console.log('Starting schedule interval (every minute)');
+
+    // Запускаем каждые 60 секунд
+    scheduleInterval = setInterval(async () => {
+        if (!isShuttingDown) {
+            await handleSchedule();
+        }
+    }, 60 * 1000); // 60000 мс = 1 минута
+}
+
+// Функция для корректного завершения работы
+async function gracefulShutdown(signal: string) {
+    console.log(`\nReceived ${signal}. Starting graceful shutdown...`);
+    isShuttingDown = true;
+
+    // Останавливаем интервальный таймер
+    if (scheduleInterval) {
+        console.log('Clearing schedule interval...');
+        clearInterval(scheduleInterval);
+        scheduleInterval = null;
+    }
+
+    // Ждем завершения текущей обработки расписания
+    let attempts = 0;
+    while (isHandlingSchedule && attempts < 30) { // макс 30 секунд ожидания
+        console.log('Waiting for schedule handler to finish...');
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        attempts++;
+    }
+
+    console.log('Graceful shutdown completed');
+    process.exit(0);
+}
+
+// Обработчики сигналов завершения
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));   // Ctrl+C
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM')); // Kill команда
+process.on('SIGUSR2', () => gracefulShutdown('SIGUSR2')); // nodemon restart
+
+// Обработка необработанных ошибок
+process.on('uncaughtException', (error) => {
+    console.error('Uncaught Exception:', error);
+    gracefulShutdown('uncaughtException');
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+    gracefulShutdown('unhandledRejection');
+});
+
 async function run() {
     try {
-        history = JSON.parse(await fs.promises.readFile('history.json', 'utf-8'));
-        memory  = JSON.parse(await fs.promises.readFile('memory.json', 'utf-8'));
+        history  = JSON.parse(await fs.promises.readFile('history.json', 'utf-8'));
+        memory   = JSON.parse(await fs.promises.readFile('memory.json', 'utf-8'));
+        schedule = JSON.parse(await fs.promises.readFile('schedule.json', 'utf-8'));
+        await handleSchedule();
+    } catch (err: any) {
+        console.log('Error when loading json data:', err);
+
+        history  = [];
+        memory   = [];
+        schedule = {};
     } finally {
+        startScheduleInterval();
         await bot.start();
     }
 }
