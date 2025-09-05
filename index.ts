@@ -26,7 +26,7 @@ let scheduleInterval: NodeJS.Timeout | null = null;
 let isShuttingDown                          = false;
 let isHandlingSchedule                      = false;
 
-const tools: Record<string, ChatCompletionTool> = {
+const tools: Record<string, any> = {
     systemInfo: {
         type    : 'function',
         function: {
@@ -83,7 +83,7 @@ const tools: Record<string, ChatCompletionTool> = {
                                 text: 'Ты персональный ассистент-бот в Telegram. Будь дружелюбным. Не используй Markdown разметку.'
                             },
                             ...memory.length > 0 ? [{
-                                type: 'text',
+                                type: 'text' as const,
                                 text: `Вот что ты знаешь о пользователе:\n${memory}`
                             }] : [],
                         ]
@@ -562,15 +562,15 @@ async function handleSchedule() {
                             role   : 'system' as const,
                             content: [
                                 {
-                                    type: 'text',
+                                    type: 'text' as const,
                                     text: 'Ты персональный ассистент-бот в Telegram. Будь дружелюбным. Не используй Markdown разметку.'
                                 },
                                 ...memory.length > 0 ? [{
-                                    type: 'text',
+                                    type: 'text' as const,
                                     text: `Вот что ты знаешь о пользователе:\n${memory}`
                                 }] : [],
                                 {
-                                    type: 'text',
+                                    type: 'text' as const,
                                     text: `Ты проверил расписание, и теперь выполняешь задачи назначенное на текущее время (${now})`
                                 }
                             ]

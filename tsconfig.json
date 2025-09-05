@@ -2,6 +2,12 @@
   "compilerOptions": {
     "esModuleInterop": true,
     "target": "ES2024",
-    "moduleResolution": "bundler"
-  }
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "outDir": "dist",
+    "rootDir": "."
+  },
+  "include": [
+    "*.ts"
+  ]
 }
