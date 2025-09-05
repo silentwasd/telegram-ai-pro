@@ -1,6 +1,7 @@
 .idea
 .env
 dist
+data
 node_modules
 history.json
 memory.json
