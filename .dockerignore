@@ -2,6 +2,7 @@
 .git
 dist
 node_modules
+data
 Dockerfile
 .gitignore
 .env

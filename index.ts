@@ -396,15 +396,15 @@ const tools: Record<string, any> = {
 };
 
 async function saveHistory() {
-    await fs.promises.writeFile('history.json', JSON.stringify(history.slice(-50)));
+    await fs.promises.writeFile('data/history.json', JSON.stringify(history.slice(-50)));
 }
 
 async function saveMemory() {
-    await fs.promises.writeFile('memory.txt', memory);
+    await fs.promises.writeFile('data/memory.txt', memory);
 }
 
 async function saveSchedule() {
-    await fs.promises.writeFile('schedule.json', JSON.stringify(schedule));
+    await fs.promises.writeFile('data/schedule.json', JSON.stringify(schedule));
 }
 
 bot.onMessage(async (ctx) => {
@@ -653,25 +653,40 @@ process.on('unhandledRejection', (reason, promise) => {
 });
 
 async function run() {
-    try {
-        history = JSON.parse(await fs.promises.readFile('history.json', 'utf-8'));
-    } catch (err: any) {
-        console.log('Error when loading history:', err);
+    if (!fs.existsSync('data'))
+        await fs.promises.mkdir('data');
+
+    if (fs.existsSync('data/history.json')) {
+        try {
+            history = JSON.parse(await fs.promises.readFile('data/history.json', 'utf-8'));
+        } catch (err: any) {
+            console.log('Error when loading history:', err);
+            history = [];
+        }
+    } else {
         history = [];
     }
 
-    try {
-        memory = await fs.promises.readFile('memory.txt', 'utf-8');
-    } catch (err: any) {
-        console.log('Error when loading memory:', err);
+    if (fs.existsSync('data/memory.txt')) {
+        try {
+            memory = await fs.promises.readFile('data/memory.txt', 'utf-8');
+        } catch (err: any) {
+            console.log('Error when loading memory:', err);
+            memory = '';
+        }
+    } else {
         memory = '';
     }
 
-    try {
-        schedule = JSON.parse(await fs.promises.readFile('schedule.json', 'utf-8'));
-        await handleSchedule();
-    } catch (err: any) {
-        console.log('Error when loading schedule:', err);
+    if (fs.existsSync('data/schedule.json')) {
+        try {
+            schedule = JSON.parse(await fs.promises.readFile('data/schedule.json', 'utf-8'));
+            await handleSchedule();
+        } catch (err: any) {
+            console.log('Error when loading schedule:', err);
+            schedule = {};
+        }
+    } else {
         schedule = {};
     }
 
